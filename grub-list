@@ -1,0 +1,224 @@
+#!/usr/bin/perl -l
+
+use strict;
+use warnings;
+
+use Getopt::Long qw(GetOptionsFromArray);
+
+
+sub error
+{
+    my ($message, $errcode) = @_;
+    my $progname = $0;
+
+    if (!defined($message)) { $message = 'undefined error'; }
+    if (!defined($errcode)) { $errcode = 1; }
+
+    $progname =~ s|^.*/||;
+
+    printf(STDERR "%s: %s\n", $progname, $message);
+    printf(STDERR "Please type '%s --help' for more information\n", $progname);
+
+    exit ($errcode);
+}
+
+sub opterr
+{
+    my ($message) = @_;
+
+    chomp($message);
+    if ($message =~ /^Unknown option: (.*)/) {
+	$message = "invalid option '" . $1 . '"';
+    } else {
+	printf(STDERR "%s\n", $message);
+	exit (1);
+    }
+
+    error($message);
+}
+
+sub usage
+{
+    return <<EOF
+Usage: $0 [grub-config]
+Display the available entries in the given grub menu, prefixed by the string
+identifier as accepted by 'grub-reboot' or 'grub-set-default'.
+If no configuration file is given, use '/boot/grub/grub.cfg'.
+
+Options:
+  -h, --help        Print this help message, then exits.
+  -V, --version     Print the verion informations, then exits.
+  -i, --indent      Display the entry names with indentation.
+  -e, --entries     Display only entries and not submenus.
+EOF
+}
+
+sub version
+{
+    return <<'EOF'
+grub-list 1.0.0
+Gauthier Voron
+gauthier.voron@lip6.fr
+EOF
+}
+
+
+sub tokenize
+{
+    my ($line) = @_;
+    my (@tokens, $part, $rem);
+    my $tok = '';
+
+    $line =~ s/^\s*//;
+    while (1) {
+	last if ($line =~ /^#/);
+	
+	if ($line =~ /^"(.*?[^\\](?:\\\\)*|)"(.*)$/) {
+	    $tok .= $1;
+	    $line = $2;
+	    next;
+	}
+
+	if ($line =~ /^'(.*?[^\\](?:\\\\)*|)'(.*)$/) {
+	    $tok .= $1;
+	    $line = $2;
+	    next;
+	}
+
+	if ($line =~ /^\\(.)(.*)$/) {
+	    $tok .= $1;
+	    $line = $2;
+	    next;
+	}
+
+	if ($line =~ /^(\S+)(.*)$/) {
+	    ($part, $rem) = ($1, $2);
+	    
+	    if ($part =~ /^([^\\'"]+)(.*)$/) {
+		$tok .= $1;
+		$rem = $2 . $rem;
+	    }
+	    
+	    $line = $rem;
+	    next;
+	}
+
+	push(@tokens, $tok);
+	$tok = '';
+	$line =~ s/^\s*//;
+
+	last if ($line eq '');
+    }
+
+    return @tokens;
+}
+
+sub parse
+{
+    my ($fh) = @_;
+    my ($line, $token, $grab, @pathstack, @names);
+    my ($pathvalue, @namestack) = (0, 0);
+
+    while (defined($line = <$fh>)) {
+    	chomp($line);
+    	next if ($line =~ /^\s*$/);
+
+	$grab = '';
+    	foreach $token (tokenize($line)) {
+	    if ($grab ne '') {
+		push(@names, [ join('>', @namestack) , $token , $grab ]);
+		$grab = '';
+	    }
+
+	    if ($token eq 'menuentry') {
+		$grab = $token;
+		$pathvalue = 1;
+		next;
+	    }
+
+	    if ($token eq 'submenu') {
+		$grab = $token;
+		$pathvalue = 1;
+		next;
+	    }
+
+	    if ($token eq '{') {
+		push(@namestack, 0);
+		push(@pathstack, $pathvalue);
+		$pathvalue = 0;
+	    }
+
+	    if ($token eq '}') {
+		pop(@namestack);
+		push(@namestack, pop(@namestack) + pop(@pathstack));
+	    }
+	}
+    }
+
+    return @names;
+}
+
+sub display
+{
+    my ($indent, $entries, @names) = @_;
+    my ($spaces, $name, $idspace);
+
+    $spaces = 0;
+    foreach $name (@names) {
+	if ($spaces < length($name->[0])) {
+	    $spaces = length($name->[0]);
+	}
+    }
+
+    foreach $name (@names) {
+	if ($indent) {
+	    $idspace = $name->[0];
+	    $idspace =~ s/[^>]//g;
+	    $idspace = length($idspace);
+	    $idspace = '  ' x $idspace;
+	} else {
+	    $idspace = '';
+	}
+
+	if (!$entries || $name->[2] eq 'menuentry') {
+	    printf('%-' . $spaces . "s %s%s\n",
+		   $name->[0], $idspace, $name->[1]);
+	}
+    }
+}
+
+
+sub main
+{
+    my ($indent, $entries) = (0, 0);
+    my ($grubcfg, $fh, @names);
+
+    Getopt::Long::Configure('permute');
+    Getopt::Long::Configure('bundling');
+    
+    $SIG{__WARN__} = \&opterr;
+    GetOptionsFromArray(
+	\@_,
+	'h|help'    => sub { printf("%s", usage()); exit (0); },
+	'V|version' => sub { printf("%s", version()); exit (0); },
+	'i|indent'  => \$indent,
+	'e|entries' => \$entries
+	);
+    $SIG{__WARN__} = undef;
+
+    $grubcfg = shift();
+    if (!defined($grubcfg)) { $grubcfg = '/boot/grub/grub.cfg'; }
+    if (!open($fh, '<', $grubcfg)) {
+	error("cannot open '" . $grubcfg . "' : " . $!);
+    } else {
+	@names = parse($fh);
+	close($fh);
+    }
+
+    display($indent, $entries, @names);
+
+    return 0;
+}
+
+exit (main(@ARGV));
+__END__
